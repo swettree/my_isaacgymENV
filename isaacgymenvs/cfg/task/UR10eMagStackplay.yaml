@@ -5,15 +5,14 @@ physics_engine: ${..physics_engine}
 
 # if given, will override the device setting in gym. 
 env:
-  numEnvs: ${resolve_default:24,${...num_envs}}
+  numEnvs: ${resolve_default:2048,${...num_envs}}
   envSpacing: 1.5
-  episodeLength: 600
+  episodeLength: 500
   enableDebugVis: False
 
   clipObservations: 5.0
   clipActions: 1.0
 
-  # startPositionNoise: 0.25
   startPositionNoise: 0.25
   startRotationNoise: 0.785
   UR10ePositionNoise: 0.0
@@ -23,12 +22,12 @@ env:
   aggregateMode: 3
 
   actionScale: 1.0
-  distRewardScale: 1.5
-  contactRewardScale: -0.5
-  oriRewardScale: 0.1
-  energyRewardScale: 0.0
+  distRewardScale: 0.1
+  liftRewardScale: 1.5
+  alignRewardScale: 2.0
+  stackRewardScale: 16.0
 
-  controlType: osc_pos  # options are {joint_tor, osc ,joint_pose, osc_pos}
+  controlType: osc  # options are {joint_tor, osc ,joint_pose, osc_pos}
 
   asset:
     assetRoot: "../../assets"
@@ -42,7 +41,7 @@ sim:
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
-  gravity: [0.0, 0.0, -9.807]
+  gravity: [0.0, 0.0, -9.81]
   physx:
     num_threads: ${....num_threads}
     solver_type: ${....solver_type}
