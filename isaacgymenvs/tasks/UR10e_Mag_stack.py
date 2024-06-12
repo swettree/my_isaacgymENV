@@ -231,6 +231,7 @@ def generate_random_coordinates_around(num_env, current_pos, device, distance=0.
     target_pos = current_pos + direction * distance
 
     return target_pos
+# Example: Generate random coordinates for 5 environments
 
 def generate_random_point(num_env):
     x = torch.rand(num_env) -0.5
@@ -244,12 +245,12 @@ def generate_random_point(num_env):
 
 def generate_trajectory(num_points,num_env):
     trajectory = []
-    radius = 0.2
+    radius = 0.1
     for i in range(num_points):
         angle = 2 * np.pi * i / num_points
-        x = torch.tensor(num_env*[0.3 + radius * np.cos(angle)])
+        x = torch.tensor(num_env*[0.25 + radius * np.cos(angle)])
         y = torch.tensor(num_env*[radius * np.sin(angle)])
-        z = torch.tensor(num_env*[1.12])
+        z = torch.tensor(num_env*[1.25])
         trajectory.append(torch.stack([x, y, z], dim=1))  # 目标位置（x, y, z）
     return torch.stack(trajectory, dim=0).permute(1, 0, 2)
 
@@ -284,16 +285,16 @@ class UR10eMagStack(VecTask):
         # 设置控制模式，末端执行器控制还是关节角控制
         # Controller type
         self.control_type = self.cfg["env"]["controlType"]
-        assert self.control_type in {"osc", "joint_tor", "joint_pos","osc_pos"},\
-            "Invalid control type specified. Must be one of: {osc, joint_tor, joint_pose, osc_pos}"
+        assert self.control_type in {"osc", "joint_tor", "joint_pos","osc_pos","vel"},\
+            "Invalid control type specified. Must be one of: {osc, joint_tor, joint_pose, osc_pos,vel}"
 
         # dimensions
         # obs include: cubeA_pose (7) + cubeB_pos (3) + eef_pose (7) + q_gripper (2)
         # TODO:
         # 设置观测的维度，本项目为obj_pos(3) + obj_vel(3) + DOF_pos(6) + DOF_vel(6)
 
-        # 原来是42,28
-        self.cfg["env"]["numObservations"] = 50
+        # 原来是50
+        self.cfg["env"]["numObservations"] = 28
         # actions include: delta EEF if OSC (6) or joint torques (7) + bool gripper (1)
         #self.cfg["env"]["numActions"] = 6 if self.control_type == "osc" else 5
         self.cfg["env"]["numActions"] = 6 if self.control_type == "osc_pos" else 6
@@ -353,20 +354,20 @@ class UR10eMagStack(VecTask):
         )
         """set target position"""
         self.point_num = torch.zeros(self.num_envs).to(self.device)
-        self.trajectory = generate_trajectory(200,self.num_envs).to(self.device)
-        self.target_pos_fre = 15
+        self.trajectory = generate_trajectory(2000,self.num_envs).to(self.device)
+        self.target_pos_fre = 5
 
-        self.target_pos = torch.tensor(self.num_envs*[0.2,0.0,1.3]).to(self.device).view(self.num_envs,3)
+        self.target_pos = torch.tensor(self.num_envs*[0.5,0.0,1.6]).to(self.device).view(self.num_envs,3)
         """set target velocity"""
         self.target_vel = torch.tensor(self.num_envs*[0.0,0.0,0.0]).to(self.device).view(self.num_envs,3)
         """set target capsule point"""
         self.target_point = torch.tensor(self.num_envs*[0.0,0.0,-1.0]).to(self.device).view(self.num_envs,3)
         # Set control limits
         # TODO:根据position控制修改
-        self.cmd_limit = to_torch([0.1, 0.1, 0.1, 0.5, 0.5, 0.5], device=self.device).unsqueeze(0) if \
+        self.cmd_limit = to_torch([0.2, 0.2, 0.2, 0.2, 0.2, 0.2], device=self.device).unsqueeze(0) if \
         self.control_type == "osc_pos" else self._UR10e_effort_limits[:6].unsqueeze(0)
 
-        self.action_fre = 4
+        self.action_fre = 2
         
         # Reset all environments
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
@@ -413,15 +414,26 @@ class UR10eMagStack(VecTask):
         asset_options.disable_gravity = True
         asset_options.thickness = 0.001
         #asset_options.default_dof_drive_mode = gymapi.DOF_MODE_EFFORT
-        asset_options.default_dof_drive_mode = gymapi.DOF_MODE_POS if \
-        self.control_type == "osc_pos" else gymapi.DOF_MODE_EFFORT
+        if self.control_type == "osc_pos" :
+            asset_options.default_dof_drive_mode = gymapi.DOF_MODE_POS 
+        elif self.control_type == "vel":
+            asset_options.default_dof_drive_mode = gymapi.DOF_MODE_VEL
+        else :
+            asset_options.default_dof_drive_mode = gymapi.DOF_MODE_EFFORT
+
         asset_options.use_mesh_materials = True
         UR10e_asset = self.gym.load_asset(self.sim, asset_root, UR10e_asset_file, asset_options)
         self.UR10e_link_dict = self.gym.get_asset_rigid_body_dict(UR10e_asset)
-        UR10e_dof_stiffness = to_torch([400, 400, 400, 400, 400, 400], dtype=torch.float, device=self.device) if \
-        self.control_type == "osc_pos" else to_torch([0, 0, 0, 0, 0, 0], dtype=torch.float, device=self.device)
-        UR10e_dof_damping = to_torch([40, 40, 40, 40, 40, 40], dtype=torch.float, device=self.device) if \
-        self.control_type == "osc_pos" else to_torch([0, 0, 0, 0, 0, 0], dtype=torch.float, device=self.device)
+        if self.control_type == "osc_pos" :
+            UR10e_dof_stiffness = to_torch([400, 400, 400, 400, 400, 400], dtype=torch.float, device=self.device) 
+            UR10e_dof_damping = to_torch([40, 40, 40, 40, 40, 40], dtype=torch.float, device=self.device)
+        elif self.control_type == "vel":
+            UR10e_dof_stiffness = to_torch([0, 0, 0, 0, 0, 0], dtype=torch.float, device=self.device) 
+            UR10e_dof_damping = to_torch([800, 800, 800, 800, 800, 800], dtype=torch.float, device=self.device)
+        else :
+            UR10e_dof_stiffness = to_torch([0, 0, 0, 0, 0, 0], dtype=torch.float, device=self.device) 
+            UR10e_dof_damping = to_torch([0, 0, 0, 0, 0, 0], dtype=torch.float, device=self.device)
+
         UR10e_dof_velocity = to_torch([0.8, 0.8, 0.8, 0.8, 0.8, 0.8], dtype=torch.float, device=self.device)
         # Create table asset
         table_pos = [0.0, 0.0, 1.0]
@@ -444,6 +456,10 @@ class UR10eMagStack(VecTask):
         capsule_opts = gymapi.AssetOptions()
         capsule_opts.linear_damping = 15
         capsule_opts.angular_damping = 5
+        # linear_damping = torch.FloatTensor(1).uniform_(10, 20).item()
+        # angular_damping = torch.FloatTensor(1).uniform_(3, 10).item()
+        # capsule_opts.linear_damping = linear_damping
+        # capsule_opts.angular_damping = angular_damping
         capsule_opts.max_linear_velocity = 1
         capsule_opts.max_angular_velocity = 10
 
@@ -479,7 +495,9 @@ class UR10eMagStack(VecTask):
 
             UR10e_dof_props['velocity'][i] = UR10e_dof_velocity[i]
             if self.control_type == "osc_pose":
-                UR10e_dof_props['driveMode'][i] = gymapi.DOF_MODE_POS 
+                UR10e_dof_props['driveMode'][i] = gymapi.DOF_MODE_POS
+            elif self.control_type == "vel":
+                UR10e_dof_props['driveMode'][i] = gymapi.DOF_MODE_VEL
             else :
                 UR10e_dof_props['driveMode'][i] = gymapi.DOF_MODE_EFFORT
 
@@ -498,9 +516,7 @@ class UR10eMagStack(VecTask):
         self.UR10e_dof_upper_limits = to_torch(self.UR10e_dof_upper_limits, device=self.device)
         self._UR10e_effort_limits = to_torch(self._UR10e_effort_limits, device=self.device)
         self.UR10e_dof_speed_scales = torch.ones_like(self.UR10e_dof_lower_limits)
-        # self.UR10e_dof_speed_scales[[7, 8]] = 0.1
-        # UR10e_dof_props['effort'][7] = 200
-        # UR10e_dof_props['effort'][8] = 200
+
 
         # Define start pose for UR10e
         UR10e_start_pose = gymapi.Transform()
@@ -692,14 +708,15 @@ class UR10eMagStack(VecTask):
         
         # for reward
         self._mc_hat = quat_rotate(normalize(self._capsule_state[:, 3:7]),mc_basic_vector).view(self.num_envs,3)
-        #self.target_pos[:,0] =  self.target_pos[:,0] + 0.00025
+
 
         """生成轨迹点"""
         # temp = (self.progress_buf % self.target_pos_fre == 0).int().squeeze(-1).clone()
         # self.point_num = self.point_num + temp
         # self.point_num = self.point_num.long()
+        # self.point_num = torch.where(self.point_num  == 1999, torch.zeros_like(self.point_num), self.point_num)
         # indices = self.point_num.unsqueeze(1).unsqueeze(2).expand(self.num_envs, 1, 3)
-        # indices = torch.clamp(indices, 0, 199)
+        # #indices = torch.clamp(indices, 0, 1999)
         # self.target_pos = torch.gather(self.trajectory, 1, indices).squeeze(1).float()
         
         #print(self.target_pos)
@@ -756,26 +773,25 @@ class UR10eMagStack(VecTask):
         self.torques[:,10,:] = mag_torque
 
 
-    # TODO：待修改
     def compute_reward(self, actions):
         self.rew_buf[:], self.reset_buf[:] = compute_UR10e_reward(
             self.reset_buf, self.progress_buf, self.actions, self.states, self.reward_settings, self.max_episode_length
         )
 
-    # TODO: 修改成ma和mc，加上末端执行器（如果是osc），若是dof_position则修改成ma，mc，joint_pos + osc_pos
+
     def compute_observations(self):
         self._refresh()
-        # obs = ["cubeA_quat", "cubeA_pos", "cubeA_to_cubeB_pos", "eef_pos", "eef_quat"]
-        # obs += ["q_gripper"] if self.control_type == "osc" else ["q"]
-        # self.obs_buf = torch.cat([self.states[ob] for ob in obs], dim=-1)
-        obs = [ "q_pos", "q_vel", "eef_pos", "eef_quat",  "eef_vel", "capsule_pos", "capsule_quat", 
-               "capsule_linear_vel", "capsule_pos_relative","mc_hat","target_pos","target_vel","target_point"]
-        # 28
-        # obs = [ "q_pos", "q_vel", "eef_pos", "eef_quat",  "eef_vel", "target_pos"]
+
+        # obs = [ "q_pos", "q_vel", "eef_pos", "eef_quat",  "eef_vel", "capsule_pos", "capsule_quat", 
+        #        "capsule_linear_vel", "capsule_pos_relative","mc_hat","target_pos","target_vel","target_point"]
+
+        obs = [ "q_pos", "q_vel", "eef_pos", "eef_quat",  "eef_vel", "target_pos"]
         self.obs_buf = torch.cat([self.states[ob] for ob in obs], dim=-1)
+        # 添加均值为0的噪声
+        # noise = torch.randn_like(self.obs_buf) * 0.01  # 0.01是噪声的标准差，可以根据需要调整
+        # self.obs_buf += noise
 
-
-        """写入文件"""
+        # """写入文件"""
         # # 创建 capsule_pos 数据的拷贝
         # capsule_pos_data = self.states["capsule_pos"][23].clone().detach().cpu().numpy()  # 转换为 NumPy 数组以便于写入 CSV
         # if capsule_pos_data.ndim == 1:
@@ -787,7 +803,7 @@ class UR10eMagStack(VecTask):
         #     #writer.writerow(["capsule_pos"])  # 写入表头
         #     writer.writerows(capsule_pos_list)  # 写入数据
 
-        #         # 创建 capsule_pos 数据的拷贝
+        # # 创建 target_pos 数据的拷贝
         # target_pos_data = self.states["target_pos"][23].clone().detach().cpu().numpy()  # 转换为 NumPy 数组以便于写入 CSV
         # if target_pos_data.ndim == 1:
         #     target_pos_data = target_pos_data.reshape(-1, 1)
@@ -807,8 +823,8 @@ class UR10eMagStack(VecTask):
     def reset_idx(self, env_ids):
         
         """生成随机三维坐标"""
-        self.target_pos[env_ids] = generate_random_coordinates(self.num_envs).to(self.device)[env_ids]
-        #print("target_pos",self.target_pos[0])
+        # self.target_pos[env_ids] = generate_random_coordinates(self.num_envs).to(self.device)[env_ids]
+        """生成随机的姿态"""
         # self.target_point = generate_random_point(self.num_envs).to(self.device)
         # [0 -- 1023]
         env_ids_int32 = env_ids.to(dtype=torch.int32)
@@ -1003,7 +1019,7 @@ class UR10eMagStack(VecTask):
 
     def pre_physics_step(self, actions):
         
-
+        #施加磁力，磁力矩
         self.gym.apply_rigid_body_force_tensors(self.sim, gymtorch.unwrap_tensor(self.forces), gymtorch.unwrap_tensor(self.torques), gymapi.ENV_SPACE)
         self.actions = actions.clone().to(self.device)
         osc_dp = self.actions[:, :]
@@ -1021,6 +1037,11 @@ class UR10eMagStack(VecTask):
         # print("arm_control shape",self._arm_control.shape)
         # Deploy actions
             self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self._arm_control))
+        elif self.control_type =="vel":
+            u_arm = osc_dp
+            self.gym.set_dof_velocity_target_tensor(self.sim, gymtorch.unwrap_tensor(u_arm))
+
+    
         else:
             u_arm = self._compute_osc_torques(dpose=osc_dp)*mask
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(u_arm))
@@ -1078,78 +1099,84 @@ def compute_UR10e_reward(
 
     """distance reward"""
     diff = states["target_pos"] - states["capsule_pos"]
-
     # 计算距离
     d = torch.norm(diff, dim=-1)
-
     # 计算每个轴上的差异
     diff_x = torch.abs(diff[:, 0])
     diff_y = torch.abs(diff[:, 1])
     diff_z = torch.abs(diff[:, 2])
-
     diff_xy = torch.sqrt(torch.pow(diff_x,2) + torch.pow(diff_x,2))
     # 距离奖励
     distance_z_reward = 1 - torch.tanh(10.0 * (diff_z) / 3.0)
     distance_y_reward = 1 - torch.tanh(10.0 * (diff_y) / 0.5)
     distance_x_reward = 1 - torch.tanh(10.0 * (diff_x) / 0.5)
     distance_xy_reward = 1 - torch.tanh(10.0 * (diff_xy) / 0.5)
-    distance_reward = -torch.tanh(10.0 * (d) / 3.0)
+    distance_reward = 1 - torch.tanh(10.0 * (d) / 3.0)
     #print(distance_xy_reward)
     # 轴对齐惩罚（示例：惩罚x轴上的大误差）
     #axis_penalty = torch.tanh(torch.abs(diff_x)) + torch.tanh(torch.abs(diff_y))
-   
     # 远近奖励（近距离高奖励，远距离低奖励）
     near_reward = torch.exp(-d / 0.5)  # 距离越近，奖励越高
 
-    # 总奖励函数
+    # 总奖励函数 1.5 * 600
     d_reward =  distance_reward 
 
-
-    
     """contact reward"""
+    # -0.5 * 600
     contact1 = torch.norm(states["table_contact"],dim=-1)
-    contact1_reward = (contact1 > 0).float()*(1.0)
+    contact1_reward = (contact1 > 0).float()
  
     
     contact2 = torch.norm(states["ma_contact"],dim=-1)
-    contact2_reward = (contact2 > 0).float()*(1.0)
+    #contact2_reward = (contact2 > 0).float()*(-0.4)
 
     """vel reward"""
     v = torch.norm(states["capsule_linear_vel"], dim=-1)
-    v_delta = torch.norm(states["capsule_linear_vel"] - states["target_vel"], dim=-1)
-    v_reward = -torch.tanh(10.0 * (v_delta) / 3.0)
-    v_penalty = -torch.ones_like(v_reward)
+    #v_delta = torch.norm(states["capsule_linear_vel"] - states["target_vel"], dim=-1)
+    v_reward = 1 - torch.tanh(10.0 * (v) / 3.0)
+
     """ori reward"""
     point_delta = torch.norm(states["mc_hat"] - states["target_point"], dim=-1)
-    p_reward = -torch.tanh(10.0 * (point_delta) / 3)
+    p_reward = 1 - torch.tanh(10.0 * (point_delta) / 3)
 
     """energy consumption reward"""
     a = torch.norm(actions, dim=-1)
-    energy_reward = -torch.tanh(6.0 * (a) / 3)
+    energy_reward = 1 - torch.tanh(6.0 * (a) / 3)
 
     # """smoothness reward"""
     # action_diff = torch.norm(actions - states["previous_actions"], dim=-1)
     # smoothness_reward = 1 - torch.tanh(10.0 * action_diff / 3)
 
-
     """process reward"""
-    reach_reward = reward_settings["r_dist_scale"]*d_reward  + reward_settings["contact_scale"]*(contact1_reward+contact2_reward) + \
+    reach_reward = reward_settings["r_dist_scale"]*d_reward  + reward_settings["contact_scale"]*contact1_reward + \
         reward_settings["ori_scale"]*p_reward + reward_settings["energy_scale"]*energy_reward
-
-    reach = (d < 0.5)
-    """keep reward"""
     
+    reach = (d < 0.05)
+    """keep reward"""
     # print("target_pos:",states["target_pos"][23])
     # print("capsule_pos:",states["capsule_pos"][23])
     # print("d",d[23])
     # print("v",v[23])
     # print("v_reward",v_reward[23])
-    keep_reward = v_penalty
+    keep_reward = torch.where((contact1 == 0.0) & reach,v_reward,torch.zeros_like(v_reward))
     
-    keep_reward = torch.where((contact1 == 0.0) & reach,torch.zeros_like(keep_reward) ,keep_reward)
-    
-    # keep_reward = torch.zeros_like(v_reward)
+
+    "arm reach reward"
+
+    # 计算距离
+    d_reward = - torch.norm(states["target_pos"] - states["eef_pos"], dim=-1)
+
+
     reset_buf = torch.where((progress_buf >= max_episode_length - 1) | (contact2 > 0), torch.ones_like(reset_buf), reset_buf)
-    rewards = reach_reward + keep_reward
+    # 15.6
+    # rewards = (reach_reward + keep_reward)
+    rewards = d_reward
+
+
+
+
+
+
+
 
     return rewards, reset_buf
