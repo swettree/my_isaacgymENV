@@ -287,6 +287,7 @@ class UR10eMagStack(VecTask):
             "contact_scale": self.cfg["env"]["contactRewardScale"],
             "ori_scale": self.cfg["env"]["oriRewardScale"],
             "energy_scale": self.cfg["env"]["energyRewardScale"],
+            "smoothness_scale": self.cfg["env"]["smoothnessRewardScale"]
         }
 
         # 设置控制模式，末端执行器控制还是关节角控制
@@ -510,7 +511,7 @@ class UR10eMagStack(VecTask):
 
             UR10e_dof_props['friction'][i] = 0
             #urdf模型中设置了最大的速度，除非是为安全保障作限制，否则不用再单独更新了
-            #UR10e_dof_props['velocity'][i] = UR10e_dof_velocity[i]
+            # UR10e_dof_props['velocity'][i] = UR10e_dof_props['velocity']
             if self.control_type == "osc_pos":
                 UR10e_dof_props['driveMode'][i] = gymapi.DOF_MODE_POS
             elif self.control_type == "vel":
@@ -1062,7 +1063,20 @@ class UR10eMagStack(VecTask):
 
         self.compute_observations()
         self.compute_reward(self.actions)
-        #self.pre_actions = self.actions
+        self.pre_actions = self.actions
+
+
+
+        if self.viewer:
+
+            self.gym.clear_lines(self.viewer)
+            sphere_pose = gymapi.Transform()
+            sphere_geom = gymutil.WireframeSphereGeometry(0.005, 5, 5, sphere_pose, color=(1, 0, 0))
+
+            for i in range(self.num_envs):
+                pos_draw = self.target_pos[i].cpu().numpy()
+                gymutil.draw_lines(geom=sphere_geom, gym=self.gym,viewer = self.viewer, env =self.envs[i], pose = gymapi.Transform(p=gymapi.Vec3(pos_draw[0], pos_draw[1], pos_draw[2])))
+
         # debug viz
         if self.viewer and self.debug_viz:
             self.gym.clear_lines(self.viewer)
@@ -1087,8 +1101,9 @@ class UR10eMagStack(VecTask):
                     self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], px[0], px[1], px[2]], [0.85, 0.1, 0.1])
                     self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], py[0], py[1], py[2]], [0.1, 0.85, 0.1])
                     self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], pz[0], pz[1], pz[2]], [0.1, 0.1, 0.85])
+                
 
-
+                
         
 #####################################################################
 ###=========================jit functions=========================###
@@ -1115,15 +1130,15 @@ def compute_UR10e_reward(
     distance_y_reward = 1 - torch.tanh(10.0 * (diff_y) / 0.5)
     distance_x_reward = 1 - torch.tanh(10.0 * (diff_x) / 0.5)
     distance_xy_reward = 1 - torch.tanh(10.0 * (diff_xy) / 0.5)
-    distance_reward = 1 - torch.tanh(10.0 * (d) / 3.0)
+    distance_reward = 1 - torch.tanh(10.0 * (d) / 3)
     #print(distance_xy_reward)
     # 轴对齐惩罚（示例：惩罚x轴上的大误差）
     #axis_penalty = torch.tanh(torch.abs(diff_x)) + torch.tanh(torch.abs(diff_y))
     # 远近奖励（近距离高奖励，远距离低奖励）
-    near_reward = torch.exp(-d / 0.5)  # 距离越近，奖励越高
-
+    #near_reward = torch.exp(-100 * d)  # 距离越近，奖励越高
+    # near_reward = torch.exp(-100 * d)
     # 总奖励函数 1.5 * 600
-    d_reward =  distance_reward 
+    d_reward = distance_reward
 
     """contact reward"""
     # -0.5 * 600
@@ -1144,16 +1159,19 @@ def compute_UR10e_reward(
     p_reward = 1 - torch.tanh(10.0 * (point_delta) / 3)
 
     """energy consumption reward"""
+    # a = torch.pow(actions, 2)
+    # energy_reward = -torch.sum(a, dim=-1)
     a = torch.norm(actions, dim=-1)
-    energy_reward = 1 - torch.tanh(6.0 * (a) / 3)
-
-    # """smoothness reward"""
-    # action_diff = torch.norm(actions - states["previous_actions"], dim=-1)
-    # smoothness_reward = 1 - torch.tanh(10.0 * action_diff / 3)
-
+    energy_reward = 1 - torch.tanh(10.0 * (a) / 3)
+    """smoothness reward"""
+    # action_diff = torch.pow(actions - states["previous_actions"], 2)
+    # smoothness_reward = -torch.sum(action_diff, dim=-1)
+    
+    action_diff = torch.norm(actions - states["previous_actions"], dim=-1)
+    smoothness_reward = 1 - torch.tanh(10.0 * (action_diff) / 3)
     """process reward"""
     reach_reward = reward_settings["r_dist_scale"]*d_reward  + reward_settings["contact_scale"]*contact1_reward + \
-        reward_settings["ori_scale"]*p_reward + reward_settings["energy_scale"]*energy_reward
+        reward_settings["ori_scale"]*p_reward + reward_settings["energy_scale"]*energy_reward + reward_settings["smoothness_scale"]*smoothness_reward
     
     reach = (d < 0.05)
     """keep reward"""
@@ -1167,9 +1185,9 @@ def compute_UR10e_reward(
 
 
 
-
+    # reset_penalty = torch.where((contact2 > 0), -200 * torch.ones_like(reset_buf), reset_buf)
     reset_buf = torch.where((progress_buf >= max_episode_length - 1) | (contact2 > 0), torch.ones_like(reset_buf), reset_buf)
-    rewards = (reach_reward + keep_reward)
+    rewards = (reach_reward + keep_reward )
     # 15.6
 
 
