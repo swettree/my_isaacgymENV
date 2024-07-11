@@ -121,8 +121,8 @@ class Magnet:
 
     u0 = 4 * np.pi * 1e-7
     def __init__(self,ma_norm,mc_norm,num_env,device):
-        self.ma_norm = ma_norm
-        self.mc_norm = mc_norm
+        self.ma_norm = ma_norm.view(num_env, 1, 1)
+        self.mc_norm = mc_norm.view(num_env, 1, 1)
         self.num_env = num_env
         self.device = device
     def Z(self):
@@ -159,7 +159,7 @@ class Magnet:
         # 行向量 
         self.p_hat_T = torch.transpose(self.p_hat,1,2)
         # 得到mc的目标朝向
-        self.target_mc_hat = self.calculate_mc_hat()
+        #self.target_mc_hat = self.calculate_mc_hat()
     
     
     def get_magnetic_force(self):
@@ -167,6 +167,7 @@ class Magnet:
 
         """consider ma_hat and mc_hat"""
         magnetic_force = 3 * self.u0 * self.ma_norm * self.mc_norm/(4 * np.pi * (self.p_norm**4)) * torch.bmm((torch.bmm(self.ma_hat,self.mc_hat_T)+torch.bmm(self.mc_hat, self.ma_hat_T) + (torch.bmm(torch.bmm(self.mc_hat_T, self.Z()), self.ma_hat))*I), self.p_hat)
+        
         # magnetic_force = (3 * u0 * self.ma_norm * self.mc_norm / (4 * np.pi * (self.p_delta_norm ** 4)) *
         #      np.dot((np.outer(self.ma_hat, self.mc_hat) + np.outer(self.mc_hat, self.ma_hat) +
         #              ((self.mc_hat.T.dot(self.Z())).dot(self.ma_hat)) * I), self.p_delta_hat))
@@ -205,10 +206,11 @@ class Magnet:
         total_force = self.get_magnetic_force() + self.get_buoyancy_force()
         return total_force
     
-def generate_random_coordinates(num_env):
-    x = torch.rand(num_env) * 0.5  # X coordinate in the range 0 to 0.5
-    y = torch.rand(num_env) * 1 - 0.5  # Y coordinate in the range -0.5 to 0.5
-    z = torch.rand(num_env) * 0.3 + 1.1  # Z coordinate in the range 1.1 to 1.3
+def generate_random_coordinates(env_ids):
+
+    x = torch.rand(len(env_ids)) * 0.2  # X coordinate in the range 0 to 0.2
+    y = torch.rand(len(env_ids)) * 0.2 - 0.1  # Y coordinate in the range -0.1 to 0.1
+    z = torch.rand(len(env_ids)) * 0.2 + 1.1  # Z coordinate in the range 1.1 to 1.3
     return torch.stack([x, y, z], dim=1)
 
 def generate_random_coordinates_around(num_env, current_pos, device, distance=0.02):
@@ -298,7 +300,7 @@ class UR10eMagStack(VecTask):
 
 
         # 原来是50
-        self.cfg["env"]["numObservations"] = 50
+        self.cfg["env"]["numObservations"] = 51
         # actions include: delta EEF if OSC (6) or joint torques (7) + bool gripper (1)
         #self.cfg["env"]["numActions"] = 6 if self.control_type == "osc" else 5
         self.cfg["env"]["numActions"] = 6 if self.control_type == "osc_pos" else 6
@@ -362,10 +364,12 @@ class UR10eMagStack(VecTask):
         self.target_pos_fre = 5
 
         self.target_pos = torch.tensor(self.num_envs*[0.2,0.0,1.4]).to(self.device).view(self.num_envs,3)
+        # self.target_height = torch.tensor(self.num_envs*[1.1]).to(self.device).view(self.num_envs,1)
         """set target velocity"""
         self.target_vel = torch.tensor(self.num_envs*[0.0,0.0,0.0]).to(self.device).view(self.num_envs,3)
         """set target capsule point"""
         self.target_point = torch.tensor(self.num_envs*[0.0,0.0,-1.0]).to(self.device).view(self.num_envs,3)
+        
         # Set control limits
         # TODO:根据position控制修改
         if self.control_type == "osc_pos":
@@ -375,7 +379,11 @@ class UR10eMagStack(VecTask):
         else:
             self.cmd_limit = self._UR10e_effort_limits[:6].unsqueeze(0)
 
-    
+        self.linear_damping = torch.ones(self.num_envs, device=self.device)*0.1
+        self.angular_damping = torch.ones(self.num_envs, device=self.device)*0.00001
+        self.action_delay = torch.zeros(self.num_envs, device=self.device)
+        self.scale_ma = torch.ones(self.num_envs, device=self.device)
+        self.scale_mc = torch.ones(self.num_envs, device=self.device)
         #设置控制频率
         if self.reset_time > 0.0:
             self.max_episode_length = int(round(self.reset_time/(self.control_freq_inv * self.dt)))
@@ -386,7 +394,7 @@ class UR10eMagStack(VecTask):
         # Reset all environments
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
 
-        self.mag = Magnet(82.5, 0.1664, self.num_envs, self.device)
+        #self.mag = Magnet(82.5, 0.1664, self.num_envs, self.device)
         # Refresh tensors
         self._refresh()
 
@@ -403,6 +411,7 @@ class UR10eMagStack(VecTask):
         print("create sim successfully")
         if self.randomize:
             self.apply_randomizations(self.randomization_params)
+            
 
     def _create_ground_plane(self):
         plane_params = gymapi.PlaneParams()
@@ -470,12 +479,9 @@ class UR10eMagStack(VecTask):
         capsule_asset_file = "urdf/UR10e_description/mc_capsule/urdf/mc_capsule.urdf"
         self.capsule_r, self.capsule_h = 0.013/2, 0.03
         capsule_opts = gymapi.AssetOptions()
-        capsule_opts.linear_damping = 15
-        capsule_opts.angular_damping = 5
-        # linear_damping = torch.FloatTensor(1).uniform_(10, 20).item()
-        # angular_damping = torch.FloatTensor(1).uniform_(3, 10).item()
-        # capsule_opts.linear_damping = linear_damping
-        # capsule_opts.angular_damping = angular_damping
+        # capsule_opts.linear_damping = 15
+        # capsule_opts.angular_damping = 5
+
         capsule_opts.max_linear_velocity = 1
         capsule_opts.max_angular_velocity = 10
 
@@ -486,10 +492,6 @@ class UR10eMagStack(VecTask):
         capsule_asset = self.gym.load_asset(self.sim, asset_root, capsule_asset_file, capsule_opts)
         capsule_color = gymapi.Vec3(0.6, 0.1, 0.0)
 
-        # Create cubeA asset
-        # cubeA_opts = gymapi.AssetOptions()
-        # cubeA_asset = self.gym.create_box(self.sim, *([self.cubeA_size] * 3), cubeA_opts)
-        # cubeA_color = gymapi.Vec3(0.6, 0.1, 0.0)
 
         # 得到连杆数量，算上基座8
         self.num_UR10e_bodies = self.gym.get_asset_rigid_body_count(UR10e_asset)
@@ -555,7 +557,7 @@ class UR10eMagStack(VecTask):
 
 
         capsule_start_pose = gymapi.Transform()
-        capsule_start_pose.p = gymapi.Vec3(-1.0, 0.0, 1.0 + table_thickness / 2 + self.capsule_r + 0.01)
+        capsule_start_pose.p = gymapi.Vec3(1.0, 0.0, 1.0 + table_thickness / 2 + self.capsule_r + 0.01)
         capsule_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
 
         # TODO: 需要考虑ma，mc
@@ -705,7 +707,7 @@ class UR10eMagStack(VecTask):
         # (num_envs, num dofs) (num_envs, 6)
         self._pos_control = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
 
-
+        
         #self._effort_control = torch.zeros_like(self._pos_control)
 
         # Initialize control
@@ -726,7 +728,7 @@ class UR10eMagStack(VecTask):
         
         # for reward
         self._mc_hat = quat_rotate(normalize(self._capsule_state[:, 3:7]),mc_basic_vector).view(self.num_envs,3)
-
+        self._ma_hat = quat_rotate(normalize(self._eef_state[:, 3:7]),ma_basic_vector).view(self.num_envs,3)
 
         """生成轨迹点"""
         # temp = (self.progress_buf % self.target_pos_fre == 0).int().squeeze(-1).clone()
@@ -748,7 +750,7 @@ class UR10eMagStack(VecTask):
             "eef_pos": self._eef_state[:, :3],
             "eef_quat": self._eef_state[:, 3:7],
             "eef_vel": self._eef_state[:, 7:],
-
+            "ma_hat": self._ma_hat,
             # 10 + 3 + 3 + 3 + 3 + 3   25
             "capsule_pos" : self._capsule_state[:, :3],
             "capsule_quat" : self._capsule_state[:, 3:7],
@@ -765,6 +767,7 @@ class UR10eMagStack(VecTask):
             "ma_contact": self._ma_contact,
             # action 6
             "previous_actions": self.pre_actions
+            
         })
         # print(self._table_contact.shape)
         self.mag.magnet_update(self.states["capsule_pos_relative"].view(self.num_envs,3,1),self.ma_hat,self.mc_hat)
@@ -785,10 +788,12 @@ class UR10eMagStack(VecTask):
 
         mag_force = self.mag.total_force().squeeze(-1)
         self.forces = torch.zeros((self.num_envs,11, 3), device=self.device, dtype=torch.float)
-        self.forces[:,10,:] = mag_force
+        self.linear_resistance = -self._capsule_state[:, 7:10] * self.linear_damping.unsqueeze(1)
+        self.forces[:,10,:] = mag_force + self.linear_resistance
         mag_torque = self.mag.get_magnetic_torque().squeeze(-1)
         self.torques = torch.zeros((self.num_envs,11, 3), device=self.device, dtype=torch.float)
-        self.torques[:,10,:] = mag_torque
+        self.angular_resistance = -self._capsule_state[:, 10:13] * self.angular_damping.unsqueeze(1)
+        self.torques[:,10,:] = mag_torque + self.angular_resistance
 
 
     def compute_reward(self, actions):
@@ -800,8 +805,8 @@ class UR10eMagStack(VecTask):
     def compute_observations(self):
         self._refresh()
 
-        obs = [ "q_pos", "q_vel", "eef_pos", "eef_quat",  "eef_vel", "capsule_pos", "capsule_quat", 
-               "capsule_linear_vel", "capsule_pos_relative","mc_hat","target_pos","target_vel","target_point"]
+        obs = [ "q_pos", "q_vel", "eef_pos",  "eef_vel", "ma_hat","capsule_pos",
+               "capsule_linear_vel", "capsule_pos_relative","mc_hat","target_pos","target_vel","target_point","previous_actions"]
 
         # obs = [ "q_pos", "eef_pos",  "target_pos"]
         self.obs_buf = torch.cat([self.states[ob] for ob in obs], dim=-1)
@@ -839,12 +844,17 @@ class UR10eMagStack(VecTask):
         return self.obs_buf
 
     def reset_idx(self, env_ids):
+
+     
         if self.randomize:
             self.apply_randomizations(self.randomization_params)       
+            self.randomize_parameters(env_ids)
 
-
+        self.mag = Magnet(82.5*self.scale_ma, 0.1664*self.scale_mc, self.num_envs, self.device)
+        # print(self.linear_damping)
         """生成随机三维坐标"""
-        self.target_pos[env_ids] = generate_random_coordinates(self.num_envs).to(self.device)[env_ids]
+        self.target_pos[env_ids] = generate_random_coordinates(env_ids).to(self.device)
+        #print(self.target_pos)
         """生成随机的姿态"""
         # self.target_point = generate_random_point(self.num_envs).to(self.device)
         # [0 -- 1023]
@@ -1009,6 +1019,17 @@ class UR10eMagStack(VecTask):
 
 
         return u
+    
+
+    def randomize_parameters(self, env_ids):
+            self.linear_damping[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.01, 0.1).to(self.device)
+            self.angular_damping[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.000001, 0.00001).to(self.device)
+            self.action_delay[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.0, 1.0).to(self.device)
+            
+            self.scale_ma[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.5, 2.0).to(self.device)
+            self.scale_mc[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.5, 2.0).to(self.device)
+            # print(self.scale_ma)
+            
 
     def pre_physics_step(self, actions):
         
@@ -1023,9 +1044,16 @@ class UR10eMagStack(VecTask):
         #施加磁力，磁力矩
         self.gym.apply_rigid_body_force_tensors(self.sim, gymtorch.unwrap_tensor(self.forces), gymtorch.unwrap_tensor(self.torques), gymapi.ENV_SPACE)
         self.actions = actions.clone().to(self.device)
-        osc_dp = self.actions[:, :]
+        action_delay_expanded = self.action_delay.unsqueeze(1).expand_as(self.actions)
+        # 施加动作延迟，1个timestep
+        if self.randomize and self.pre_actions != None:
+            # print(self.action_delay.shape)
+            osc_dp = torch.where(action_delay_expanded < 0.5,self.actions,self.pre_actions)
+
+        else:
+            osc_dp = self.actions
         
-        mask = (self.progress_buf % self.action_fre == 0).float().unsqueeze(-1)
+        #mask = (self.progress_buf % self.action_fre == 0).float().unsqueeze(-1)
         
         # Control arm (scale value first)
         osc_dp = osc_dp * self.cmd_limit / self.action_scale
@@ -1045,8 +1073,10 @@ class UR10eMagStack(VecTask):
 
     
         else:
-            u_arm = self._compute_osc_torques(dpose=osc_dp)*mask
+            u_arm = self._compute_osc_torques(dpose=osc_dp)
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(u_arm))
+        
+        self.pre_actions = self.actions
 
         
         
@@ -1063,9 +1093,10 @@ class UR10eMagStack(VecTask):
 
         self.compute_observations()
         self.compute_reward(self.actions)
-        self.pre_actions = self.actions
+        
 
 
+        
 
         if self.viewer:
 
@@ -1130,7 +1161,8 @@ def compute_UR10e_reward(
     distance_y_reward = 1 - torch.tanh(10.0 * (diff_y) / 0.5)
     distance_x_reward = 1 - torch.tanh(10.0 * (diff_x) / 0.5)
     distance_xy_reward = 1 - torch.tanh(10.0 * (diff_xy) / 0.5)
-    distance_reward = 1 - torch.tanh(10.0 * (d) / 3)
+    distance_reward = 1 - torch.tanh(10.0 * (d) / 1.0)
+    # distance_reward = torch.exp(-10*d)
     #print(distance_xy_reward)
     # 轴对齐惩罚（示例：惩罚x轴上的大误差）
     #axis_penalty = torch.tanh(torch.abs(diff_x)) + torch.tanh(torch.abs(diff_y))
@@ -1140,7 +1172,11 @@ def compute_UR10e_reward(
     # 总奖励函数 1.5 * 600
     d_reward = distance_reward
 
-    """contact reward"""
+    # diff_height = torch.abs(states["target_height"] - states["capsule_pos"][:,2].unsqueeze(1)).squeeze(1)
+    # print(diff_height.shape)
+    # height_reward = torch.exp(-30*diff_height)
+
+    """contact penalty"""
     # -0.5 * 600
     contact1 = torch.norm(states["table_contact"],dim=-1)
     contact1_reward = (contact1 > 0).float()
@@ -1158,21 +1194,29 @@ def compute_UR10e_reward(
     point_delta = torch.norm(states["mc_hat"] - states["target_point"], dim=-1)
     p_reward = 1 - torch.tanh(10.0 * (point_delta) / 3)
 
-    """energy consumption reward"""
-    # a = torch.pow(actions, 2)
-    # energy_reward = -torch.sum(a, dim=-1)
-    a = torch.norm(actions, dim=-1)
-    energy_reward = 1 - torch.tanh(10.0 * (a) / 3)
-    """smoothness reward"""
-    # action_diff = torch.pow(actions - states["previous_actions"], 2)
-    # smoothness_reward = -torch.sum(action_diff, dim=-1)
+    """energy consumption penalty"""
+    a = torch.pow(actions, 2)
+    energy_reward = -torch.sum(a, dim=-1)
+    # a = torch.norm(actions, dim=-1)
+    # energy_reward = 1 - torch.tanh(10.0 * (a) / 3)
+    """smoothness penalty"""
+    action_diff = torch.pow(actions - states["previous_actions"], 2)
+    smoothness_reward = -torch.sum(action_diff, dim=-1)
     
-    action_diff = torch.norm(actions - states["previous_actions"], dim=-1)
-    smoothness_reward = 1 - torch.tanh(10.0 * (action_diff) / 3)
+    # action_diff = torch.norm(actions - states["previous_actions"], dim=-1)
+    # smoothness_reward = 1 - torch.tanh(10.0 * (action_diff) / 3)
+
+    # """levitate reward"""
+
+    # levitate_reward = reward_settings["contact_scale"]*contact1_reward + 2 * height_reward
+    # levitate = (diff_height<0.05)
+
+
     """process reward"""
     reach_reward = reward_settings["r_dist_scale"]*d_reward  + reward_settings["contact_scale"]*contact1_reward + \
         reward_settings["ori_scale"]*p_reward + reward_settings["energy_scale"]*energy_reward + reward_settings["smoothness_scale"]*smoothness_reward
     
+    # process_reward = torch.where(levitate,reach_reward,levitate_reward)
     reach = (d < 0.05)
     """keep reward"""
     # print("target_pos:",states["target_pos"][23])
@@ -1180,16 +1224,18 @@ def compute_UR10e_reward(
     # print("d",d[23])
     # print("v",v[23])
     # print("v_reward",v_reward[23])
+
+
+
+
     keep_reward = torch.where((contact1 == 0.0) & reach,v_reward,torch.zeros_like(v_reward))
     
-
-
-
     # reset_penalty = torch.where((contact2 > 0), -200 * torch.ones_like(reset_buf), reset_buf)
     reset_buf = torch.where((progress_buf >= max_episode_length - 1) | (contact2 > 0), torch.ones_like(reset_buf), reset_buf)
+    
     rewards = (reach_reward + keep_reward )
     # 15.6
-
+    rewards = torch.clip(rewards, 0., None)
 
 
     "arm reach reward"
