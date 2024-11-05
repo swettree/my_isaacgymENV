@@ -31,6 +31,7 @@ import os
 import torch
 import csv
 import time
+import pandas as pd
 
 from isaacgym import gymtorch
 from isaacgym import gymapi
@@ -208,54 +209,125 @@ class Magnet:
     
 def generate_random_coordinates(env_ids):
 
-    x = torch.rand(len(env_ids)) * 0.2  # X coordinate in the range 0 to 0.2
-    y = torch.rand(len(env_ids)) * 0.2 - 0.1  # Y coordinate in the range -0.1 to 0.1
-    z = torch.rand(len(env_ids)) * 0.2 + 1.1  # Z coordinate in the range 1.1 to 1.3
+    x = torch.rand(len(env_ids)) * 0.24 + 0.1  # X coordinate in the range [0.1, 0.3]
+    y = torch.rand(len(env_ids)) * 0.24 - 0.1  # Y coordinate in the range [-0.1, 0.1]
+    z = torch.rand(len(env_ids)) * 0.24 + 1.1  # Z coordinate in the range [1.1, 1.3]
     return torch.stack([x, y, z], dim=1)
 
-def generate_random_coordinates_around(num_env, current_pos, device, distance=0.02):
-    """
-    在当前点位置周围生成随机目标点,距离为distance。
 
-    参数:
-    - current_pos: 当前点的位置，形状为(num_env, 3)的Tensor。
-    - distance: 目标点距离当前点的距离,默认值为0.02。
+def generate_random_point(env_ids):
+    # 生成均匀分布的极角 θ 在 [0, π] 范围内
+    theta = torch.rand(len(env_ids)) * torch.pi
+    # 生成均匀分布的方位角 φ 在 [0, 2π] 范围内
+    phi = torch.rand(len(env_ids)) * 2 * torch.pi
 
-    返回:
-    - target_pos: 生成的目标点，形状为(num_env, 3)的Tensor。
-    """
-    # 随机生成方向向量
-    direction = torch.randn(num_env, 3).to(device)
+    # 将球坐标转换为笛卡尔坐标
+    x = torch.sin(theta) * torch.cos(phi)
+    y = torch.sin(theta) * torch.sin(phi)
+    z = torch.cos(theta)
 
-    # 将方向向量标准化
-    direction = direction / torch.norm(direction, dim=-1, keepdim=True)
-
-    # 生成随机点在当前位置周围的目标点
-    target_pos = current_pos + direction * distance
-
-    return target_pos
-# Example: Generate random coordinates for 5 environments
-
-def generate_random_point(num_env):
-    x = torch.rand(num_env) -0.5
-    y = torch.rand(num_env) -0.5
-    z = torch.rand(num_env) -0.5
-    point = torch.stack([x, y, z], dim=1)
-    point_norm = torch.norm(point,dim=1,p=2, keepdim=True)
-    point_hat = point/point_norm
+    # 生成的方向向量
+    point_hat = torch.stack([x, y, z], dim=1)
 
     return point_hat
 
-def generate_trajectory(num_points,num_env):
+def generate_trajectory(form, num_points, num_env):
+    trajectory = []
+    if form == 0:
+        trajectory = _generate_circle_trajectory(num_points, num_env)
+    elif form == 1:
+        trajectory = _generate_spiral_trajectory(num_points, num_env)
+    elif form == 2:
+        trajectory = _generate_square_wave_yz_trajectory(num_points, num_env)
+    elif form == 3:
+        trajectory = _generate_square_wave_xy_trajectory(num_points, num_env)
+    else:
+        raise ValueError("Invalid trajectory form")
+    return torch.stack(trajectory, dim=0).permute(1, 0, 2)
+
+
+def _generate_circle_trajectory(num_points, num_env):
     trajectory = []
     radius = 0.1
     for i in range(num_points):
         angle = 2 * np.pi * i / num_points
-        x = torch.tensor(num_env*[0.25 + radius * np.cos(angle)])
-        y = torch.tensor(num_env*[radius * np.sin(angle)])
-        z = torch.tensor(num_env*[1.25])
-        trajectory.append(torch.stack([x, y, z], dim=1))  # 目标位置（x, y, z）
-    return torch.stack(trajectory, dim=0).permute(1, 0, 2)
+        x = torch.tensor(num_env * [0.2 + radius * np.cos(angle)])
+        y = torch.tensor(num_env * [radius * np.sin(angle)])
+        z = torch.tensor(num_env * [1.2])
+        trajectory.append(torch.stack([x, y, z], dim=1))
+    return trajectory
+
+
+def _generate_spiral_trajectory(num_points, num_env):
+    trajectory = []
+    radius = 0.1
+    num_turns = 3
+    height = 0.2
+    for i in range(num_points):
+        angle = 2 * np.pi * num_turns * i / num_points
+        x = torch.tensor(num_env * [0.2 + radius * np.cos(angle)])
+        y = torch.tensor(num_env * [radius * np.sin(angle)])
+        z = torch.tensor(num_env * [1.1 + height * i / num_points])
+        trajectory.append(torch.stack([x, y, z], dim=1))
+    return trajectory
+
+
+def _generate_square_wave_yz_trajectory(num_points, num_env):
+    trajectory = []
+    amplitude = 0.16
+    wide = 0.04
+    frequency = 2
+    delta_p = ((2*frequency + 1) * amplitude + 2 * frequency * wide) / num_points
+    segment = num_points / (frequency * 12 + 1)
+    cir = 0
+    up = 1
+    x = torch.tensor(num_env * [0.2])
+    y = torch.tensor(num_env * [-0.08])
+    z = torch.tensor(num_env * [1.12])
+    trajectory.append(torch.stack([x, y, z], dim=1))
+    for i in range(num_points):
+        if cir % 2 != 0:
+            y += delta_p
+        else:
+            z += delta_p if up == 1 else -delta_p
+        if i in [4 * segment, 9 * segment, 14 * segment, 19 * segment]:
+            cir += 1
+            up = 1 - up
+        elif i in [5 * segment, 10 * segment, 15 * segment, 20 * segment]:
+            cir += 1
+        trajectory.append(torch.stack([x, y, z], dim=1))
+    return trajectory
+
+
+def _generate_square_wave_xy_trajectory(num_points, num_env):
+    trajectory = []
+    amplitude = 0.16
+    wide = 0.04
+    frequency = 2
+    delta_p = ((2*frequency + 1) * amplitude + 2 * frequency * wide) / num_points
+    segment = num_points / (frequency * 12 + 1)
+    cir = 0
+    up = 1
+    x = torch.tensor(num_env * [0.2])
+    y = torch.tensor(num_env * [-0.08])
+    z = torch.tensor(num_env * [1.12])
+    trajectory.append(torch.stack([x, y, z], dim=1))
+    for i in range(num_points):
+        if cir % 2 != 0:
+            x += delta_p if up == 1 else -delta_p
+        else:
+            y += delta_p
+        if i in [4 * segment, 9 * segment, 14 * segment, 19 * segment]:
+            cir += 1
+            up = 1 - up
+        elif i in [5 * segment, 10 * segment, 15 * segment, 20 * segment]:
+            cir += 1
+        trajectory.append(torch.stack([x, y, z], dim=1))
+    return trajectory
+
+
+
+
 
 class UR10eMagStack(VecTask):
 
@@ -266,7 +338,7 @@ class UR10eMagStack(VecTask):
         # 设置最大单次时长
         self.max_episode_length = self.cfg["env"]["episodeLength"]
         """要改"""
-        self.action_fre = 2
+
         self.reset_time = self.cfg["env"].get("resetTime", -1.0)
 
         self.randomize = self.cfg["task"]["randomize"]
@@ -299,8 +371,8 @@ class UR10eMagStack(VecTask):
             "Invalid control type specified. Must be one of: {osc, joint_tor, joint_pose, osc_pos,vel}"
 
 
-        # 原来是50
-        self.cfg["env"]["numObservations"] = 51
+        # 39
+        self.cfg["env"]["numObservations"] = 39
         # actions include: delta EEF if OSC (6) or joint torques (7) + bool gripper (1)
         #self.cfg["env"]["numActions"] = 6 if self.control_type == "osc" else 5
         self.cfg["env"]["numActions"] = 6 if self.control_type == "osc_pos" else 6
@@ -310,11 +382,10 @@ class UR10eMagStack(VecTask):
         # 关节角数
         self.num_dofs = None                    # Total number of DOFs per env
         self.actions = None                     # Current actions to be deployed
+        self.pre_actions = None
+        self.alpha = 0.6  # EMA系数
 
 
-        # self._init_cubeA_state = None           # Initial state of cubeA for the current env
-        # self._cubeA_state = None                # Current state of cubeA for the current env
-        # self._cubeA_id = None                   # Actor ID corresponding to cubeA for a given env
 
 
         self._init_capsule_state = None           # Initial state of cubeA for the current env
@@ -328,7 +399,7 @@ class UR10eMagStack(VecTask):
         self._qd = None                     # Joint velocities          (n_envs, n_dof)
         self._rigid_body_state = None  # State of all rigid bodies             (n_envs, n_bodies, 13)
         self._contact_state = None
-        self.pre_actions = None
+        
         # self._eef_state = None  # end effector state (at grasping point)
         # self._eef_lf_state = None  # end effector state (at left fingertip)
         # self._eef_rf_state = None  # end effector state (at left fingertip)
@@ -358,17 +429,76 @@ class UR10eMagStack(VecTask):
         self.UR10e_default_dof_pos = to_torch(
             [-0.294, -1.650, 2.141, -2.062, -1.572, 1.277], device=self.device
         )
-        """set target position"""
-        self.point_num = torch.zeros(self.num_envs).to(self.device)
-        self.trajectory = generate_trajectory(2000,self.num_envs).to(self.device)
-        self.target_pos_fre = 5
 
-        self.target_pos = torch.tensor(self.num_envs*[0.2,0.0,1.4]).to(self.device).view(self.num_envs,3)
+        """是否记录"""
+        self.record_flag = False
+        """设置速度干扰"""
+        self.push_flag = False
+        self.push_interval = 400
+        self.external_force = torch.zeros(self.num_envs,3).to(self.device)
+        self.wall_force = torch.zeros(self.num_envs,3).to(self.device)
+        """是否在一个episode中,多次改变目标点"""
+        self.once_reach = torch.zeros(self.num_envs).to(self.device)
+        self.update_time_flag = False
+        self.update_reach_flag = False
+        self.update_target_pos_timestep = 300
+
+        """在reset时是否改变目标位置"""
+        self.random_pos_flag = False
+        if self.random_pos_flag:
+            self.target_pos = generate_random_coordinates(torch.ones(self.num_envs)).to(self.device)
+        else:
+            self.target_pos = torch.tensor(self.num_envs*[0.2,0.0,1.2]).to(self.device).view(self.num_envs,3)
+
+        """set trajectory"""
+        self.trajectory_flag = False
+        if self.trajectory_flag:
+            self.point_num = torch.zeros(self.num_envs).to(self.device)
+            self.point_number = 1500
+            # 圆：0，螺旋：1, 方波yz:2，方波xy: 3
+            self.form = 3
+            self.trajectory = generate_trajectory(self.form, self.point_number,self.num_envs).to(self.device)
+            self.target_pos_fre = 4
+            self.circle_num = 0
+
+        """记录全空间热点图"""
+
+        self.heat_flag = False
+        if self.heat_flag:
+            x_min, x_max = 0.1, 0.3
+            y_min, y_max = -0.1, 0.1
+            z_value = 1.3
+            self.file_error_path = 'mean_error_data200.csv'
+            # 计算步长
+            x_step = (x_max - x_min) / 10  # 10 个步长
+            y_step = (y_max - y_min) / 10  # 10 个步长
+
+            # 生成 x 和 y 的网格
+            x_values = torch.arange(x_min, x_max + x_step, x_step)
+            y_values = torch.arange(y_min, y_max + y_step, y_step)
+            x_grid, y_grid = torch.meshgrid(x_values[:11], y_values[:11], indexing='ij')
+
+            # 将 x 和 y 坐标展开为向量，并生成 z 坐标
+            x_flat = x_grid.flatten()
+        
+            y_flat = y_grid.flatten()
+            z_flat = torch.full_like(x_flat, z_value)  # z 坐标全为 1.1
+            # 将 x, y, z 组合成最终的 tensor
+            self.target_pos = torch.stack((x_flat, y_flat, z_flat), dim=1).to(self.device)
+        
+        
+
         # self.target_height = torch.tensor(self.num_envs*[1.1]).to(self.device).view(self.num_envs,1)
         """set target velocity"""
         self.target_vel = torch.tensor(self.num_envs*[0.0,0.0,0.0]).to(self.device).view(self.num_envs,3)
         """set target capsule point"""
-        self.target_point = torch.tensor(self.num_envs*[0.0,0.0,-1.0]).to(self.device).view(self.num_envs,3)
+        # 每次reset
+        self.random_point_flag = False
+        # 每个episode多次改变
+        self.update_time_ori_flag = False
+        self.record_point_flag = False
+        self.point_count = 0
+        self.target_point = torch.tensor(self.num_envs*[0.0,0.0,1.0]).to(self.device).view(self.num_envs,3)
         
         # Set control limits
         # TODO:根据position控制修改
@@ -380,7 +510,7 @@ class UR10eMagStack(VecTask):
             self.cmd_limit = self._UR10e_effort_limits[:6].unsqueeze(0)
 
         self.linear_damping = torch.ones(self.num_envs, device=self.device)*0.1
-        self.angular_damping = torch.ones(self.num_envs, device=self.device)*0.00001
+        self.angular_damping = torch.ones(self.num_envs, device=self.device)*0.000005
         self.action_delay = torch.zeros(self.num_envs, device=self.device)
         self.scale_ma = torch.ones(self.num_envs, device=self.device)
         self.scale_mc = torch.ones(self.num_envs, device=self.device)
@@ -393,7 +523,7 @@ class UR10eMagStack(VecTask):
 
         # Reset all environments
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-
+        
         #self.mag = Magnet(82.5, 0.1664, self.num_envs, self.device)
         # Refresh tensors
         self._refresh()
@@ -475,23 +605,34 @@ class UR10eMagStack(VecTask):
         table_stand_opts.fix_base_link = True
         table_stand_asset = self.gym.create_box(self.sim, *[0.2, 0.2, table_stand_height], table_opts)
 
+
+
+
+
         # load capsule
         capsule_asset_file = "urdf/UR10e_description/mc_capsule/urdf/mc_capsule.urdf"
         self.capsule_r, self.capsule_h = 0.013/2, 0.03
         capsule_opts = gymapi.AssetOptions()
         # capsule_opts.linear_damping = 15
         # capsule_opts.angular_damping = 5
-
         capsule_opts.max_linear_velocity = 1
         capsule_opts.max_angular_velocity = 10
-
         capsule_opts.disable_gravity = False
         capsule_opts.flip_visual_attachments = True
         # capsule_opts.override_com = True
         # capsule_opts.override_inertia = True
         capsule_asset = self.gym.load_asset(self.sim, asset_root, capsule_asset_file, capsule_opts)
         capsule_color = gymapi.Vec3(0.6, 0.1, 0.0)
-
+        # print(capsule_opts.linear_damping)
+        
+        # glassbox_asset_file = "urdf/UR10e_description/glass_box/urdf/glass_box.urdf"
+        # glassbox_options = gymapi.AssetOptions()
+        # glassbox_options.flip_visual_attachments = True
+        # glassbox_options.fix_base_link = True
+        # glassbox_options.disable_gravity = False
+        # glassbox_options.thickness = 0.001
+        # glassbox_options.use_mesh_materials = False
+        # glassbox_asset = self.gym.load_asset(self.sim, asset_root, glassbox_asset_file, glassbox_options)
 
         # 得到连杆数量，算上基座8
         self.num_UR10e_bodies = self.gym.get_asset_rigid_body_count(UR10e_asset)
@@ -555,17 +696,22 @@ class UR10eMagStack(VecTask):
         table_stand_start_pose.p = gymapi.Vec3(*table_stand_pos)
         table_stand_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
 
+        # glassbox_start_pose = gymapi.Transform()
+        # glassbox_start_pose.p = gymapi.Vec3(0.2, 0.0, 1.0 + table_thickness / 2)
+        # glassbox_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
 
+        
         capsule_start_pose = gymapi.Transform()
-        capsule_start_pose.p = gymapi.Vec3(1.0, 0.0, 1.0 + table_thickness / 2 + self.capsule_r + 0.01)
+        capsule_start_pose.p = gymapi.Vec3(0.2, 0.0, 1.0 + table_thickness / 2 + self.capsule_r + 0.01+ 0.005)
         capsule_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
+        self.init_capsule_pos = torch.tensor([capsule_start_pose.p.x,capsule_start_pose.p.y,capsule_start_pose.p.z]*self.num_envs).to(self.device).view(self.num_envs,3)
 
         # TODO: 需要考虑ma，mc
         # compute aggregate size
         num_UR10e_bodies = self.gym.get_asset_rigid_body_count(UR10e_asset)
         num_UR10e_shapes = self.gym.get_asset_rigid_shape_count(UR10e_asset)
-        max_agg_bodies = num_UR10e_bodies + 3     # 1 for table, table stand, capsule
-        max_agg_shapes = num_UR10e_shapes + 3     # 1 for table, table stand, capsule
+        max_agg_bodies = num_UR10e_bodies + 4    # 1 for table, table stand, capsule, glass
+        max_agg_shapes = num_UR10e_shapes + 4     # 1 for table, table stand, capsule, glass
 
         self.UR10es_handles = []
         self.envs = []
@@ -603,15 +749,17 @@ class UR10eMagStack(VecTask):
             # 8
             table_actor = self.gym.create_actor(env_ptr, table_asset, table_start_pose, "table", i, 1, 0)
             # 9
-            table_stand_actor = self.gym.create_actor(env_ptr, table_stand_asset, table_stand_start_pose, "table_stand",
-                                                      i, 1, 0)
+            table_stand_actor = self.gym.create_actor(env_ptr, table_stand_asset, table_stand_start_pose, "table_stand", i, 1, 0)
+            # 10                                         
+            # glassbox_actor = self.gym.create_actor(env_ptr, glassbox_asset, glassbox_start_pose, "glassbox", i, 1, 0)
+          
             # TODO：将aggregate设置为1，即将机械臂和ma聚合在一起，需要在此之前将ma创建
             if self.aggregate_mode == 1:
                 self.gym.begin_aggregate(env_ptr, max_agg_bodies, max_agg_shapes, True)
 
 
-            # Create cubes
-            # 10
+            # Create capsule
+            # 11
             self.capsule_actor = self.gym.create_actor(env_ptr, capsule_asset, capsule_start_pose, "capsule", i, 2, 0)
             self.gym.set_rigid_body_color(env_ptr, self.capsule_actor, 0, gymapi.MESH_VISUAL, capsule_color)
             capsule_idx = self.gym.get_actor_rigid_body_index(env_ptr, self.capsule_actor, 0, gymapi.DOMAIN_SIM)
@@ -678,6 +826,7 @@ class UR10eMagStack(VecTask):
         self._contact_state = gymtorch.wrap_tensor(self._contact_tensor).view(self.num_envs,-1,3)
         """ma的状态"""
         self._eef_state = self._rigid_body_state[:, self.handles["ma_handle"], :]
+        
         UR10e_lastlink_index = self.UR10e_link_dict["ma"]
         "jacobian矩阵"
         _jacobian = self.gym.acquire_jacobian_tensor(self.sim, "ur10e")
@@ -689,8 +838,16 @@ class UR10eMagStack(VecTask):
         mc_basic_vector = torch.tensor(self.num_envs*[1.0,0.0,0]).to(self.device).view(self.num_envs,3)
         self._mc_hat = quat_rotate(normalize(self._capsule_state[:, 3:7]),mc_basic_vector).view(self.num_envs,3,1)
         """获取桌面碰撞state"""
-        self._table_contact = self._contact_state[:,8,:]
-        self._ma_contact = self._contact_state[:,7,:]
+        self.table_contact = self._contact_state[:,8,:]
+        self.ma_contact = self._contact_state[:,7,:]
+        # self.glass_contact = self._contact_state[:,10,:]
+        self.robot_contact = self._contact_state[:,:8,:]
+
+        
+
+        
+
+
         """action"""
         self.pre_actions = torch.zeros((self.num_envs, 6), dtype=torch.float, device=self.device)
         # Initialize states
@@ -714,34 +871,39 @@ class UR10eMagStack(VecTask):
 
         self._arm_control = self._pos_control[:, :6]
 
-        # 创建了一个 (num envs,4)，每个环境创造4个索引,四个东西
+        # 创建了一个 (num envs,5)，每个环境创造4个索引,四个东西
+        # self._global_indices = torch.arange(self.num_envs * 5, dtype=torch.int32,
+        #                                    device=self.device).view(self.num_envs, -1)
         self._global_indices = torch.arange(self.num_envs * 4, dtype=torch.int32,
                                            device=self.device).view(self.num_envs, -1)
+        
 
 
     def _update_states(self):
         # for force and torque
         mc_basic_vector = torch.tensor(self.num_envs*[0.0,1.0,0.0]).to(self.device).view(self.num_envs,3)
         self.mc_hat = quat_rotate(normalize(self._capsule_state[:, 3:7]),mc_basic_vector).view(self.num_envs,3,1)
-        ma_basic_vector = torch.tensor(self.num_envs*[0.0,1.0,0.0]).to(self.device).view(self.num_envs,3)
+        ma_basic_vector = torch.tensor(self.num_envs*[0.0,0.0,1.0]).to(self.device).view(self.num_envs,3)
+        # ma_basic_vector = torch.tensor(self.num_envs*[0.0,1.0,0.0]).to(self.device).view(self.num_envs,3)
         self.ma_hat = quat_rotate(normalize(self._eef_state[:, 3:7]),ma_basic_vector).view(self.num_envs,3,1)
         
         # for reward
         self._mc_hat = quat_rotate(normalize(self._capsule_state[:, 3:7]),mc_basic_vector).view(self.num_envs,3)
         self._ma_hat = quat_rotate(normalize(self._eef_state[:, 3:7]),ma_basic_vector).view(self.num_envs,3)
 
-        """生成轨迹点"""
-        # temp = (self.progress_buf % self.target_pos_fre == 0).int().squeeze(-1).clone()
-        # self.point_num = self.point_num + temp
-        # self.point_num = self.point_num.long()
-        # self.point_num = torch.where(self.point_num  == 1999, torch.zeros_like(self.point_num), self.point_num)
-        # indices = self.point_num.unsqueeze(1).unsqueeze(2).expand(self.num_envs, 1, 3)
-        # #indices = torch.clamp(indices, 0, 1999)
-        # self.target_pos = torch.gather(self.trajectory, 1, indices).squeeze(1).float()
+
+
+
+        self._update_target_positions_based_on_distance()
+        self._update_target_positions_based_on_time()
+        """ 随时间更新姿态"""
+        self._update_target_orientation_based_on_time()
+
+
+        """ 生成轨迹点 """
+        self._generate_trajectory_points()
         
-        #print(self.target_pos)
-        #print(self.point_num) 
-        # print(self.target_pos)
+
         self.states.update({
             # 50 + 6
             # UR10e 12 + 13  25
@@ -765,15 +927,79 @@ class UR10eMagStack(VecTask):
             # contact
             "table_contact": self._table_contact,
             "ma_contact": self._ma_contact,
+            "robot_contact": self._robot_contact,
+            # "glass_contact": self._glass_contact,
             # action 6
             "previous_actions": self.pre_actions
             
         })
+
+        
+
+
+
+        """写入文件"""
+        if self.record_flag:
+            self._record_training_data()
+
+
         # print(self._table_contact.shape)
         self.mag.magnet_update(self.states["capsule_pos_relative"].view(self.num_envs,3,1),self.ma_hat,self.mc_hat)
         
+    def _update_target_positions_based_on_distance(self):
+        if self.update_reach_flag:
+            done_reach_ids = (self.reach_buf == 50).nonzero(as_tuple=False).flatten()
+            if len(done_reach_ids) > 0:
+                new_target_positions = generate_random_coordinates(done_reach_ids).to(self.device)
+                self.target_pos[done_reach_ids] = new_target_positions
+                self.reach_buf[done_reach_ids] = 0
+                self.update_timeout_buf[done_reach_ids] = 0
+                self.once_reach[done_reach_ids] = 0
 
-        
+    def _update_target_positions_based_on_time(self):
+        if self.update_time_flag:
+            long_progress_env_ids = (self.update_timeout_buf == self.update_target_pos_timestep).nonzero(as_tuple=False).squeeze(-1)
+            if len(long_progress_env_ids) > 0:
+                new_target_positions = generate_random_coordinates(long_progress_env_ids).to(self.device)
+                self.target_pos[long_progress_env_ids] = new_target_positions
+                self.reach_buf[long_progress_env_ids] = 0
+                self.update_timeout_buf[long_progress_env_ids] = 0
+                self.once_reach[long_progress_env_ids] = 0
+
+    def _generate_trajectory_points(self):
+        if self.trajectory_flag:
+            temp = (self.progress_buf % self.target_pos_fre == 0).int().squeeze(-1).clone()
+            self.point_num = self.point_num + temp
+            self.point_num = self.point_num.long()
+            self.circle_num = torch.where(self.point_num == self.point_number - 1, self.circle_num + 1, self.circle_num)
+            self.point_num = torch.where(self.point_num == self.point_number - 1, torch.zeros_like(self.point_num), self.point_num)
+            print(self.circle_num[23])
+            indices = self.point_num.unsqueeze(1).unsqueeze(2).expand(self.num_envs, 1, 3)
+            self.target_pos = torch.gather(self.trajectory, 1, indices).squeeze(1).float()
+
+    def _update_target_orientation_based_on_time(self):
+        if self.update_time_ori_flag:
+            update_ori_env_ids = (self.progress_buf % 300 == 0).nonzero(as_tuple=False).squeeze(-1)
+            if len(update_ori_env_ids) > 0:
+                new_target_point = generate_random_point(update_ori_env_ids).to(self.device)
+                self.target_point[update_ori_env_ids] = new_target_point
+                if self.record_point_flag:
+                    self._record_target_orientation()
+
+    def _record_target_orientation(self):
+        self.point_count += 1
+        print(self.point_count)
+        capsule_pos_data = self.states["mc_hat"][22].clone().detach().cpu().numpy()
+        capsule_pos_list = capsule_pos_data.tolist()
+        with open('mc_hat.csv', mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerows(capsule_pos_list)
+
+        capsule_target_point = self.states["target_point"][22].clone().detach().cpu().numpy()
+        capsule_point_list = capsule_target_point.tolist()
+        with open('target_hat.csv', mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerows([capsule_point_list])
 
     def _refresh(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)
@@ -784,64 +1010,78 @@ class UR10eMagStack(VecTask):
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
         # Refresh states
+        self._ma_contact = torch.norm(self.ma_contact,dim=-1).view(self.num_envs,1)
+        # self._glass_contact = torch.norm(self.glass_contact,dim = -1).view(self.num_envs,1)
+        self._table_contact = torch.norm(self.table_contact,dim = -1).view(self.num_envs,1)
+        self._robot_contact = torch.norm(self.robot_contact,dim = -1)
+
         self._update_states()
 
         mag_force = self.mag.total_force().squeeze(-1)
         self.forces = torch.zeros((self.num_envs,11, 3), device=self.device, dtype=torch.float)
         self.linear_resistance = -self._capsule_state[:, 7:10] * self.linear_damping.unsqueeze(1)
-        self.forces[:,10,:] = mag_force + self.linear_resistance
+
+        self.forces[:,10,:] = mag_force + self.linear_resistance + self.wall_force
         mag_torque = self.mag.get_magnetic_torque().squeeze(-1)
         self.torques = torch.zeros((self.num_envs,11, 3), device=self.device, dtype=torch.float)
         self.angular_resistance = -self._capsule_state[:, 10:13] * self.angular_damping.unsqueeze(1)
         self.torques[:,10,:] = mag_torque + self.angular_resistance
+       
 
 
     def compute_reward(self, actions):
-        self.rew_buf[:], self.reset_buf[:] = compute_UR10e_reward(
-            self.reset_buf, self.progress_buf, self.actions, self.states, self.reward_settings, self.max_episode_length
+        self.rew_buf[:], self.reset_buf[:], self.reach_buf[:], self.update_timeout_buf[:] ,self.once_reach[:] = compute_UR10e_reward(
+            self.reset_buf, self.progress_buf,self.reach_buf, self.update_timeout_buf[:],self.once_reach[:], self.actions, self.states, self.reward_settings, self.max_episode_length
         )
 
 
     def compute_observations(self):
         self._refresh()
 
-        obs = [ "q_pos", "q_vel", "eef_pos",  "eef_vel", "ma_hat","capsule_pos",
-               "capsule_linear_vel", "capsule_pos_relative","mc_hat","target_pos","target_vel","target_point","previous_actions"]
-
-        # obs = [ "q_pos", "eef_pos",  "target_pos"]
+        
+        obs = [ "q_pos","q_vel", "eef_pos","eef_vel", "ma_hat","capsule_pos" ,"capsule_linear_vel", "mc_hat","target_pos","target_point"]
+ 
         self.obs_buf = torch.cat([self.states[ob] for ob in obs], dim=-1)
-        # 添加均值为0的噪声
-        # noise = torch.randn_like(self.obs_buf) * 0.01  # 0.01是噪声的标准差，可以根据需要调整
-        # self.obs_buf += noise
-
-        # """写入文件"""
-        # # 创建 capsule_pos 数据的拷贝
-        # capsule_pos_data = self.states["capsule_pos"][23].clone().detach().cpu().numpy()  # 转换为 NumPy 数组以便于写入 CSV
-        # if capsule_pos_data.ndim == 1:
-        #     capsule_pos_data = capsule_pos_data.reshape(-1, 1)
-        # capsule_pos_list = capsule_pos_data.tolist()
-        # # 将 capsule_pos 数据写入 CSV 文件
-        # with open('capsule_pos.csv', mode='a', newline='') as file:
-        #     writer = csv.writer(file)
-        #     #writer.writerow(["capsule_pos"])  # 写入表头
-        #     writer.writerows(capsule_pos_list)  # 写入数据
-
-        # # 创建 target_pos 数据的拷贝
-        # target_pos_data = self.states["target_pos"][23].clone().detach().cpu().numpy()  # 转换为 NumPy 数组以便于写入 CSV
-        # if target_pos_data.ndim == 1:
-        #     target_pos_data = target_pos_data.reshape(-1, 1)
-        # target_pos_list = target_pos_data.tolist()
-        # # 将 capsule_pos 数据写入 CSV 文件
-        # with open('target_pos.csv', mode='a', newline='') as file:
-        #     writer = csv.writer(file)
-        #     #writer.writerow(["target_pos"])  # 写入表头
-        #     writer.writerows(target_pos_list)  # 写入数据
 
 
+
+
+        state = ["q_pos", "q_vel", "eef_pos",  "eef_vel", "ma_hat","capsule_pos",
+               "capsule_linear_vel", "capsule_pos_relative","mc_hat","target_pos","target_point","previous_actions","table_contact","robot_contact"]
+  
+        self.states_buf = torch.cat([self.states[ob] for ob in state], dim=-1)
         # 暂时不知道有什么用
         maxs = {ob: torch.max(self.states[ob]).item() for ob in obs}
 
-        return self.obs_buf
+        return self.obs_buf, self.states_buf
+    
+
+    def _record_training_data(self):
+        capsule_pos_data = self.states["capsule_pos"][23].clone().detach().cpu().numpy()
+        capsule_pos_list = capsule_pos_data.tolist()
+
+        with open('capsule_train_pos.csv', mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerows([capsule_pos_list])
+
+        target_pos_data = self.states["target_pos"][23].clone().detach().cpu().numpy()
+        target_pos_list = target_pos_data.tolist()
+
+        with open('target_pos.csv', mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerows([target_pos_list])
+
+        error = torch.norm(self.target_pos - self.states["capsule_pos"], dim=1)
+
+        if self.progress_buf[23] > 500:
+            self.error_buffer.append(error.cpu().numpy())
+            if len(self.error_buffer) > 300:
+                self.error_buffer.pop(0)
+            if len(self.error_buffer) == 300:
+                error_buffer_np = np.array(self.error_buffer)
+                mean_error = error_buffer_np.mean(axis=0)
+                pd.DataFrame([mean_error]).to_csv(self.file_error_path, header=False, index=False, mode='w')
+
 
     def reset_idx(self, env_ids):
 
@@ -850,17 +1090,32 @@ class UR10eMagStack(VecTask):
             self.apply_randomizations(self.randomization_params)       
             self.randomize_parameters(env_ids)
 
-        self.mag = Magnet(82.5*self.scale_ma, 0.1664*self.scale_mc, self.num_envs, self.device)
+        # self.randomize_parameters(env_ids)
+        self.error_buffer = []
+        # 0.1664,0.6052
+        self.mag = Magnet(82.5*self.scale_ma, 0.8052*self.scale_mc, self.num_envs, self.device)
         # print(self.linear_damping)
         """生成随机三维坐标"""
-        self.target_pos[env_ids] = generate_random_coordinates(env_ids).to(self.device)
+        if self.random_pos_flag:
+            self.target_pos[env_ids] = generate_random_coordinates(env_ids).to(self.device)
+        # self.target_pos[env_ids] = torch.tensor(len(env_ids)*[0.2,0.0,1.2]).to(self.device).view(len(env_ids),3)
         #print(self.target_pos)
         """生成随机的姿态"""
-        # self.target_point = generate_random_point(self.num_envs).to(self.device)
+        if self.random_point_flag:
+            self.target_point[env_ids] = generate_random_point(env_ids).to(self.device)
         # [0 -- 1023]
         env_ids_int32 = env_ids.to(dtype=torch.int32)
+        """生成随机的外力"""
+        if self.push_flag:
+            xy_force = torch_rand_float(-5, 5, (len(env_ids), 2), device=self.device)
+            self.external_force[env_ids] = torch.cat((xy_force, torch.zeros(len(env_ids), 1, device=self.device)), dim=1)
+            self.wall_force[env_ids] = torch.zeros(len(env_ids),3).to(self.device)
+            
+            
+            
         # 生成轨迹时用的
-        self.point_num[env_ids] = 0
+        if self.trajectory_flag:
+            self.point_num[env_ids] = 0
         self._reset_init_cube_state(env_ids=env_ids, check_valid=False)
         #self._reset_init_cube_state(cube='A', env_ids=env_ids, check_valid=True)
         # self._i = True
@@ -902,7 +1157,7 @@ class UR10eMagStack(VecTask):
                                               len(multi_env_ids_int32))
 
         # Update cube states
-        
+        # 有glass就是4
         multi_env_ids_cubes_int32 = self._global_indices[env_ids, 3].flatten()
 
         self.gym.set_actor_root_state_tensor_indexed(
@@ -911,6 +1166,8 @@ class UR10eMagStack(VecTask):
 
         self.progress_buf[env_ids] = 0
         self.reset_buf[env_ids] = 0
+        self.reach_buf[env_ids] = 0
+        self.update_timeout_buf[env_ids] = 0
 
     def _reset_init_cube_state(self, env_ids, check_valid=True):
         """
@@ -939,21 +1196,7 @@ class UR10eMagStack(VecTask):
         # [num env]
         obj_heights = self.states["capsule_heights"]
         
-        # elif cube.lower() == 'b':
-        #     this_cube_state_all = self._init_cubeB_state
-        #     other_cube_state = self._init_cubeA_state[env_ids, :]
-        #     cube_heights = self.states["cubeA_size"]
-        # else:
-        #     raise ValueError(f"Invalid cube specified, options are 'A' and 'B'; got: {cube}")
 
-        # Minimum cube distance for guarenteed collision-free sampling is the sum of each cube's effective radius
-        # min_dists = (self.states["cubeA_size"] + self.states["cubeB_size"])[env_ids] * np.sqrt(2) / 2.0
-
-        # We scale the min dist by 2 so that the cubes aren't too close together
-        # min_dists = min_dists * 2.0
-
-        # Sampling is "centered" around middle of table
-        # [2]
         centered_cube_xy_state = torch.tensor(self._table_surface_pos[:2], device=self.device, dtype=torch.float32)
         
         # Set z value, which is fixed height
@@ -961,8 +1204,8 @@ class UR10eMagStack(VecTask):
 
         # Initialize rotation, which is no rotation (quat w = 1)
         sampled_obj_state[:, 6] = 1.0
-        sampled_obj_state[:, :2] = centered_cube_xy_state.unsqueeze(0) + \
-                                              2.0 * self.start_position_noise * (
+        sampled_obj_state[:, :2] = self.init_capsule_pos[env_ids,:2] + \
+                                              0.95 * self.start_position_noise * (
                                                       torch.rand(num_resets, 2, device=self.device) - 0.5)
 
         # Sample rotation value
@@ -1022,17 +1265,24 @@ class UR10eMagStack(VecTask):
     
 
     def randomize_parameters(self, env_ids):
-            self.linear_damping[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.01, 0.1).to(self.device)
+            # 0.01 - 0.1
+            self.linear_damping[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.05, 0.1).to(self.device)
             self.angular_damping[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.000001, 0.00001).to(self.device)
             self.action_delay[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.0, 1.0).to(self.device)
             
-            self.scale_ma[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.5, 2.0).to(self.device)
-            self.scale_mc[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.5, 2.0).to(self.device)
+            # mean = 1.0
+            # std_dev = 0.1
+            # self.scale_ma[env_ids] = torch.normal(mean, std_dev, size=(len(env_ids),)).to(self.device)
+            # self.scale_mc[env_ids] = torch.normal(mean, std_dev, size=(len(env_ids),)).to(self.device)
             # print(self.scale_ma)
-            
+            self.scale_ma[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.95, 1.02).to(self.device)
+            self.scale_mc[env_ids] = torch.FloatTensor(len(env_ids)).uniform_(0.95, 1.02).to(self.device)
 
     def pre_physics_step(self, actions):
         
+        if self.push_flag:
+            push_ids = (self.progress_buf >= self.push_interval).nonzero(as_tuple=False).flatten()
+            self.push_capsules_force(push_ids)
 
         # current_time = time.time()
         # if self.last_time is not None:
@@ -1044,17 +1294,24 @@ class UR10eMagStack(VecTask):
         #施加磁力，磁力矩
         self.gym.apply_rigid_body_force_tensors(self.sim, gymtorch.unwrap_tensor(self.forces), gymtorch.unwrap_tensor(self.torques), gymapi.ENV_SPACE)
         self.actions = actions.clone().to(self.device)
-        action_delay_expanded = self.action_delay.unsqueeze(1).expand_as(self.actions)
-        # 施加动作延迟，1个timestep
-        if self.randomize and self.pre_actions != None:
-            # print(self.action_delay.shape)
-            osc_dp = torch.where(action_delay_expanded < 0.5,self.actions,self.pre_actions)
-
+        if self.pre_actions is None:
+            pass
         else:
-            osc_dp = self.actions
+            self.actions = self.alpha * self.actions  + (1 - self.alpha) * self.pre_actions
+
+        action_delay_expanded = self.action_delay.unsqueeze(1).expand_as(self.actions)
         
-        #mask = (self.progress_buf % self.action_fre == 0).float().unsqueeze(-1)
+        # """施加动作延迟,1个timestep"""
+        # if self.randomize and self.pre_actions != None:
+        #     # print(self.action_delay.shape)
+        #     osc_dp = torch.where(action_delay_expanded <= 0.5,self.actions,self.pre_actions)
+
+        # else:
+        #     osc_dp = self.actions
         
+        osc_dp = self.actions
+        
+
         # Control arm (scale value first)
         osc_dp = osc_dp * self.cmd_limit / self.action_scale
         
@@ -1080,58 +1337,88 @@ class UR10eMagStack(VecTask):
 
         
         
+    def push_capsules(self,env_id):
+        external_disturb = torch_rand_float(-1.5, 1.5, (len(env_id), 3), device=self.device)
+
+        self._root_state[env_id, 3,7:10] += external_disturb # lin vel x/y/z
+        
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self._root_state))
+
+    def push_capsules_force(self, env_id):
+
+
+            # 在 xy 平面上生成一个随机的外力，只作用在 x 和 y 方向，z 方向力为 0
+        decay_factor = torch.where(self.progress_buf >= self.push_interval, 
+                                0.99 ** (self.progress_buf - self.push_interval), 
+                                torch.tensor(1.0, device=self.device)).unsqueeze(-1)
+        
+        self.external_force[env_id] = self.external_force[env_id]*decay_factor[env_id]
+
+        self.wall_force[env_id] = self.external_force[env_id]
+        
+
 
 
 
     def post_physics_step(self):
         self.progress_buf += 1
         self.randomize_buf += 1
+        self.update_timeout_buf = torch.where(self.once_reach == 1,self.update_timeout_buf + 1, torch.zeros_like(self.update_timeout_buf))
         # print(self.target_pos)
+
+        # if self.push_flag:
+        #     push_ids = (self.progress_buf % self.push_interval == 0).nonzero(as_tuple=False).flatten()
+        #     if len(push_ids) > 0:
+        #         self.push_capsules(push_ids)
+
+
         env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(env_ids) > 0:
             self.reset_idx(env_ids)
 
+
         self.compute_observations()
         self.compute_reward(self.actions)
         
-
+        
+        
 
         
 
         if self.viewer:
+            self._visualize_target_positions()
 
-            self.gym.clear_lines(self.viewer)
-            sphere_pose = gymapi.Transform()
-            sphere_geom = gymutil.WireframeSphereGeometry(0.005, 5, 5, sphere_pose, color=(1, 0, 0))
-
-            for i in range(self.num_envs):
-                pos_draw = self.target_pos[i].cpu().numpy()
-                gymutil.draw_lines(geom=sphere_geom, gym=self.gym,viewer = self.viewer, env =self.envs[i], pose = gymapi.Transform(p=gymapi.Vec3(pos_draw[0], pos_draw[1], pos_draw[2])))
-
-        # debug viz
         if self.viewer and self.debug_viz:
-            self.gym.clear_lines(self.viewer)
-            self.gym.refresh_rigid_body_state_tensor(self.sim)
+            self._visualize_debug_info()
 
-            # Grab relevant states to visualize
-            eef_pos = self.states["eef_pos"]
-            eef_rot = self.states["eef_quat"]
-            capsule_pos = self.states["capsule_pos"]
-            capsule_rot = self.states["capsule_quat"]
-            # cubeB_pos = self.states["cubeB_pos"]
-            # cubeB_rot = self.states["cubeB_quat"]
+    def _visualize_target_positions(self):
+        self.gym.clear_lines(self.viewer)
+        sphere_pose = gymapi.Transform()
+        sphere_geom = gymutil.WireframeSphereGeometry(0.005, 5, 5, sphere_pose, color=(1, 0, 0))
 
-            # Plot visualizations
-            for i in range(self.num_envs):
-                for pos, rot in zip((eef_pos, capsule_pos), (eef_rot, capsule_rot)):
-                    px = (pos[i] + quat_apply(rot[i], to_torch([1, 0, 0], device=self.device) * 0.2)).cpu().numpy()
-                    py = (pos[i] + quat_apply(rot[i], to_torch([0, 1, 0], device=self.device) * 0.2)).cpu().numpy()
-                    pz = (pos[i] + quat_apply(rot[i], to_torch([0, 0, 1], device=self.device) * 0.2)).cpu().numpy()
+        for i in range(self.num_envs):
+            pos_draw = self.target_pos[i].cpu().numpy()
+            gymutil.draw_lines(geom=sphere_geom, gym=self.gym, viewer=self.viewer, env=self.envs[i], pose=gymapi.Transform(p=gymapi.Vec3(pos_draw[0], pos_draw[1], pos_draw[2])))
 
-                    p0 = pos[i].cpu().numpy()
-                    self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], px[0], px[1], px[2]], [0.85, 0.1, 0.1])
-                    self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], py[0], py[1], py[2]], [0.1, 0.85, 0.1])
-                    self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], pz[0], pz[1], pz[2]], [0.1, 0.1, 0.85])
+    def _visualize_debug_info(self):
+        self.gym.clear_lines(self.viewer)
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+
+        eef_pos = self.states["eef_pos"]
+        eef_rot = self.states["eef_quat"]
+        capsule_pos = self.states["capsule_pos"]
+        capsule_rot = self.states["capsule_quat"]
+
+        for i in range(self.num_envs):
+            for pos, rot in zip((eef_pos, capsule_pos), (eef_rot, capsule_rot)):
+                px = (pos[i] + quat_apply(rot[i], to_torch([1, 0, 0], device=self.device) * 0.2)).cpu().numpy()
+                py = (pos[i] + quat_apply(rot[i], to_torch([0, 1, 0], device=self.device) * 0.2)).cpu().numpy()
+                pz = (pos[i] + quat_apply(rot[i], to_torch([0, 0, 1], device=self.device) * 0.2)).cpu().numpy()
+
+                p0 = pos[i].cpu().numpy()
+                self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], px[0], px[1], px[2]], [0.85, 0.1, 0.1])
+                self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], py[0], py[1], py[2]], [0.1, 0.85, 0.1])
+                self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], pz[0], pz[1], pz[2]], [0.1, 0.1, 0.85])
                 
 
                 
@@ -1143,56 +1430,59 @@ class UR10eMagStack(VecTask):
 
 #@torch.jit.script
 def compute_UR10e_reward(
-    reset_buf, progress_buf, actions, states, reward_settings, max_episode_length
+    reset_buf, progress_buf,reach_buf, update_timeout_buf, once_reach, actions, states, reward_settings, max_episode_length
 ):
-    # type: (Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, float], float) -> Tuple[Tensor, Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,Dict[str, Tensor], Dict[str, float], float) -> Tuple[Tensor, Tensor,Tensor, Tensor, Tensor]
 
+    "ma distance"
+
+    ma_height = states["eef_pos"][:,2]
+    near_table_panalty = -2 * (ma_height<1.155).int()
     """distance reward"""
     diff = states["target_pos"] - states["capsule_pos"]
     # 计算距离
+    linear_diff_penalty = -torch.sum(torch.abs(diff),dim = -1)
+    #0.25
+    
     d = torch.norm(diff, dim=-1)
+    # approach = (d < 0.05)
+    approach = (d < 0.01)
+    reach = (d < 0.003)
     # 计算每个轴上的差异
     diff_x = torch.abs(diff[:, 0])
     diff_y = torch.abs(diff[:, 1])
     diff_z = torch.abs(diff[:, 2])
     diff_xy = torch.sqrt(torch.pow(diff_x,2) + torch.pow(diff_x,2))
     # 距离奖励
-    distance_z_reward = 1 - torch.tanh(10.0 * (diff_z) / 3.0)
-    distance_y_reward = 1 - torch.tanh(10.0 * (diff_y) / 0.5)
-    distance_x_reward = 1 - torch.tanh(10.0 * (diff_x) / 0.5)
-    distance_xy_reward = 1 - torch.tanh(10.0 * (diff_xy) / 0.5)
-    distance_reward = 1 - torch.tanh(10.0 * (d) / 1.0)
-    # distance_reward = torch.exp(-10*d)
-    #print(distance_xy_reward)
-    # 轴对齐惩罚（示例：惩罚x轴上的大误差）
-    #axis_penalty = torch.tanh(torch.abs(diff_x)) + torch.tanh(torch.abs(diff_y))
-    # 远近奖励（近距离高奖励，远距离低奖励）
-    #near_reward = torch.exp(-100 * d)  # 距离越近，奖励越高
-    # near_reward = torch.exp(-100 * d)
-    # 总奖励函数 1.5 * 600
-    d_reward = distance_reward
-
-    # diff_height = torch.abs(states["target_height"] - states["capsule_pos"][:,2].unsqueeze(1)).squeeze(1)
-    # print(diff_height.shape)
-    # height_reward = torch.exp(-30*diff_height)
+    distance_reward = 1 - torch.tanh(10.0 * (d) / 3.0)
+    near_reward = 1 - torch.tanh(2.0 * (d) )
+    
+    d_reward = torch.where(approach, near_reward, 0.3*distance_reward)
 
     """contact penalty"""
     # -0.5 * 600
-    contact1 = torch.norm(states["table_contact"],dim=-1)
-    contact1_reward = (contact1 > 0).float()
- 
+    # glass_contact = states["glass_contact"].squeeze(-1)
+    table_contact = states["table_contact"].squeeze(-1)
+    contact2 = states["robot_contact"]
+    contact2 = torch.norm(contact2[:,:],dim=-1).squeeze(-1)
+    # # print("contact2",contact2[23])
+    # #contact2_reward = (contact2 > 0).float()*(-0.4)
+    # print("contact2",contact2[23])
+    # glass_reward = ((glass_contact > 0) | (table_contact > 0)).float()
+    glass_reward = ((table_contact > 0)).float()
     
-    contact2 = torch.norm(states["ma_contact"],dim=-1)
-    #contact2_reward = (contact2 > 0).float()*(-0.4)
-
+    """ori reward"""
+    point_delta = torch.norm(states["mc_hat"] - states["target_point"], dim=-1)
+    p_reward = 1 - torch.tanh(10.0 * (point_delta) / 3)
+    """reach reward"""
+    reach_reward = reward_settings["r_dist_scale"]*d_reward  + reward_settings["contact_scale"]*glass_reward
+        
+    # reach_reward = reward_settings["r_dist_scale"]*d_reward  + reward_settings["contact_scale"]*glass_reward 
+    
     """vel reward"""
     v = torch.norm(states["capsule_linear_vel"], dim=-1)
     #v_delta = torch.norm(states["capsule_linear_vel"] - states["target_vel"], dim=-1)
     v_reward = 1 - torch.tanh(10.0 * (v) / 3.0)
-
-    """ori reward"""
-    point_delta = torch.norm(states["mc_hat"] - states["target_point"], dim=-1)
-    p_reward = 1 - torch.tanh(10.0 * (point_delta) / 3)
 
     """energy consumption penalty"""
     a = torch.pow(actions, 2)
@@ -1203,40 +1493,39 @@ def compute_UR10e_reward(
     action_diff = torch.pow(actions - states["previous_actions"], 2)
     smoothness_reward = -torch.sum(action_diff, dim=-1)
     
-    # action_diff = torch.norm(actions - states["previous_actions"], dim=-1)
-    # smoothness_reward = 1 - torch.tanh(10.0 * (action_diff) / 3)
-
-    # """levitate reward"""
-
-    # levitate_reward = reward_settings["contact_scale"]*contact1_reward + 2 * height_reward
-    # levitate = (diff_height<0.05)
-
-
-    """process reward"""
-    reach_reward = reward_settings["r_dist_scale"]*d_reward  + reward_settings["contact_scale"]*contact1_reward + \
-        reward_settings["ori_scale"]*p_reward + reward_settings["energy_scale"]*energy_reward + reward_settings["smoothness_scale"]*smoothness_reward
-    
-    # process_reward = torch.where(levitate,reach_reward,levitate_reward)
-    reach = (d < 0.05)
     """keep reward"""
-    # print("target_pos:",states["target_pos"][23])
+    # print("target_pos:",states["target_pos"])
     # print("capsule_pos:",states["capsule_pos"][23])
     # print("d",d[23])
     # print("v",v[23])
-    # print("v_reward",v_reward[23])
+    # print("v_reward",v_reward[23])的
 
+    """位置的稀疏奖励"""
+    reach_exact_reward = torch.where(reach, 16*torch.ones_like(v_reward),torch.zeros_like(v_reward))
+    """准静态惩罚"""
+    suspension_penalty = torch.where(reach, reward_settings["energy_scale"]*energy_reward + reward_settings["smoothness_scale"]*smoothness_reward + reward_settings["ori_scale"]*p_reward , torch.zeros_like(v_reward))
 
+    """更新惩罚"""
+    reach_buf = torch.where(reach, reach_buf + 1, torch.zeros_like(reach_buf))
+    once_reach = torch.where(reach,torch.ones_like(once_reach), once_reach)
 
+    keep_reward = torch.where(reach_buf == 50, 500*torch.ones_like(reach_buf), 0)
+    # align_reward = torch.where(approach,reward_settings["ori_scale"]*p_reward + reward_settings["energy_scale"]*energy_reward + reward_settings["smoothness_scale"]*smoothness_reward ,torch.zeros_like(reach_reward))
+    #update_penalty = torch.where(reach & (update_timeout_buf > 150), - update_timeout_buf/1000,torch.zeros_like(update_timeout_buf))
 
-    keep_reward = torch.where((contact1 == 0.0) & reach,v_reward,torch.zeros_like(v_reward))
-    
+    # print(reach_buf)
     # reset_penalty = torch.where((contact2 > 0), -200 * torch.ones_like(reset_buf), reset_buf)
-    reset_buf = torch.where((progress_buf >= max_episode_length - 1) | (contact2 > 0), torch.ones_like(reset_buf), reset_buf)
+    reset_buf = torch.where((progress_buf >= max_episode_length - 1) | (contact2 > 0) , torch.ones_like(reset_buf), reset_buf)
     
-    rewards = (reach_reward + keep_reward )
+    rewards = (reach_reward + reach_exact_reward + suspension_penalty + keep_reward)
+    # rewards = (reach_reward + align_reward)
+    # reach_buf = torch.where(reach, reach_buf + 1, torch.zeros_like(reach_buf))
+    # reset_buf = torch.where((progress_buf >= max_episode_length - 1) | (contact2 > 0), torch.ones_like(reset_buf), reset_buf)
+    # reset_penalty = torch.where((contact2 > 0)|((glass_contact > 0) &(progress_buf >= max_episode_length - 1) ), -1000 * torch.ones_like(reset_buf), torch.zeros_like(reset_buf))
+    # rewards = linear_diff_penalty + -0.2*glass_reward + reset_penalty
+
     # 15.6
     rewards = torch.clip(rewards, 0., None)
-
 
     "arm reach reward"
 
@@ -1249,4 +1538,4 @@ def compute_UR10e_reward(
 
 
 
-    return rewards, reset_buf
+    return rewards, reset_buf, reach_buf, update_timeout_buf, once_reach
